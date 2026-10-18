@@ -1,5 +1,5 @@
-import { join } from 'node:path'
-import { readdir, stat, access } from 'node:fs/promises'
+import { basename, join, relative, sep } from 'node:path'
+import { readdir, lstat, stat } from 'node:fs/promises'
 import glob from 'fast-glob'
 
 /**
@@ -14,10 +14,10 @@ async function calculateDirSize(dirPath) {
     for (const item of items) {
       const itemPath = join(dirPath, item);
       try {
-        const stats = await stat(itemPath);
+        const stats = await lstat(itemPath);
         if (stats.isDirectory()) {
           totalSize += await calculateDirSize(itemPath);
-        } else {
+        } else if (stats.isFile()) {
           totalSize += stats.size;
         }
       } catch (err) {
@@ -32,10 +32,10 @@ async function calculateDirSize(dirPath) {
   return totalSize;
 }
 
-async function fileExists(path) {
+async function directoryExists(path) {
   try {
-    await access(path);
-    return true;
+    const stats = await stat(path);
+    return stats.isDirectory();
   } catch {
     return false;
   }
@@ -49,17 +49,15 @@ async function fileExists(path) {
  */
 async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**/.git/**', '**/Library/**', '**/Temp/**', '**/Obj/**']) {
   const builds = [];
-  const processedDirs = new Set();
 
   try {
-    if (!await fileExists(targetDir)) return [];
-
     // Find all TemplateData directories
     const templateDataPaths = await glob('**/TemplateData', {
       cwd: targetDir,
       ignore: ignorePatterns,
       onlyDirectories: true,
-      absolute: false
+      absolute: false,
+      followSymbolicLinks: false
     });
 
     // Process TemplateData directories
@@ -67,21 +65,18 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       // TemplateData is inside the build directory, so we need the parent
       const buildDir = join(targetDir, relativePath.replace(/TemplateData$/, ''));
 
-      if (processedDirs.has(buildDir)) continue;
-
       // Check if this is a valid build by verifying if it contains Build directory with wasm file
       const buildSubDir = join(buildDir, 'Build');
-      if (!await fileExists(buildSubDir)) continue;
+      if (!await directoryExists(buildSubDir)) continue;
 
       // Check for wasm file in the Build directory
       const wasmFiles = await glob('**/*.wasm*', {
         cwd: buildSubDir,
-        absolute: false
+        absolute: false,
+        followSymbolicLinks: false
       });
 
       if (wasmFiles.length === 0) continue;
-
-      processedDirs.add(buildDir);
 
       const pathParts = relativePath.split(/[/\\]/);
       let buildName;
@@ -92,10 +87,10 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       }
 
       if (!buildName) {
-        buildName = 'Unknown Build';
+        buildName = basename(targetDir) || 'Unity WebGL Build';
       }
 
-      const relPath = buildDir.substring(targetDir.length).replace(/\\/g, '/');
+      const relPath = relative(targetDir, buildDir).split(sep).filter(Boolean).join('/');
       const size = await calculateDirSize(buildDir);
 
       // Detect compression type
@@ -103,8 +98,7 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
 
       builds.push({
         name: buildName,
-        path: relPath.endsWith('/') ? relPath : `${relPath}/`,
-        fullpath: buildDir,
+        path: relPath ? `/${relPath.split('/').map(encodeURIComponent).join('/')}/` : '/',
         size,
         compressionType
       });
@@ -126,7 +120,7 @@ async function detectCompressionType(buildDir) {
   let compressionType = 'Unknown';
   try {
     const buildSubdir = join(buildDir, 'Build');
-    if (await fileExists(buildSubdir)) {
+    if (await directoryExists(buildSubdir)) {
       const buildFiles = await readdir(buildSubdir);
       for (const file of buildFiles) {
         if (file.endsWith('.wasm.br')) {
@@ -137,6 +131,9 @@ async function detectCompressionType(buildDir) {
           break;
         } else if (file.endsWith('.wasm')) {
           compressionType = 'Uncompressed';
+          break;
+        } else if (file.endsWith('.wasm.unityweb')) {
+          compressionType = 'Decompression fallback';
           break;
         }
       }
@@ -167,19 +164,30 @@ function generateBuildsList(builds) {
   }
 
   const buildItems = builds
-    .map(build => `<li><a href="${build.path}" title="${build.fullpath}"><span class="build-name">${build.name}</span><span class="build-size">${build.compressionType} ${formatSizeToMB(build.size)}</span></a></li>`)
+    .map(build => `<li><a href="${escapeHtml(build.path)}"><span class="build-name">${escapeHtml(build.name)}</span><span class="build-size">${escapeHtml(build.compressionType)} ${formatSizeToMB(build.size)}</span></a></li>`)
     .join('');
 
   return `<ul>${buildItems}</ul>`;
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[character]);
+}
+
 /**
  * Generates HTML for the homepage displaying available Unity WebGL builds
  * @param {string} targetDir - Root directory to scan
+ * @param {Array} [discoveredBuilds] - Pre-scanned builds; scanned from targetDir when omitted
  * @returns {Promise<string>} HTML content
  */
-async function generateHomepage(targetDir) {
-  const builds = await scanBuilds(targetDir);
+async function generateHomepage(targetDir, discoveredBuilds) {
+  const builds = discoveredBuilds ?? await scanBuilds(targetDir);
 
   // Sort builds by name in ascending order
   builds.sort((a, b) => a.name.localeCompare(b.name));
@@ -274,7 +282,7 @@ async function generateHomepage(targetDir) {
         </head>
         <body>
             <div class="container">
-                <h1>${targetDir}</h1>
+                <h1>Unity WebGL Builds</h1>
                 ${content}
             </div>
         </body>
@@ -282,4 +290,4 @@ async function generateHomepage(targetDir) {
   `;
 }
 
-export { generateHomepage };
+export { generateHomepage, scanBuilds };

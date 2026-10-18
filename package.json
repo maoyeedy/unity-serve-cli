@@ -4,12 +4,16 @@
   "description": "Server for Unity WebGL builds",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "unity-serve": "./index.js"
   },
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "test": "node --test test/server.test.js test/homepage.test.js"
   },
   "keywords": [
     "unity",
