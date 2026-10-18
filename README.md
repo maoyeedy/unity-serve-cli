@@ -4,7 +4,7 @@
 
 <img src="Assets/Screenshot.png" alt="Screenshot" width="500px" />
 
-A blazing fast server that host Unity WebGL builds with correct headers, supporting Gzip and Brotli.
+A blazing fast, dependency-free server that host Unity WebGL builds with correct headers, supporting Gzip and Brotli.
 
 ## Installation
 
