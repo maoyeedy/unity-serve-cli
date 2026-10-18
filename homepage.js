@@ -1,6 +1,5 @@
 import { basename, join, relative, sep } from 'node:path'
 import { readdir, lstat, stat } from 'node:fs/promises'
-import glob from 'fast-glob'
 
 /**
  * Calculates the total size of a directory recursively
@@ -41,24 +40,51 @@ async function directoryExists(path) {
   }
 }
 
+const DEFAULT_IGNORED_DIRS = ['node_modules', '.git', 'Library', 'Temp', 'Obj'];
+
+/**
+ * Walks a directory tree without following symlinks or entering hidden or ignored directories
+ * @param {string} root - Directory to walk
+ * @param {(entry: import('node:fs').Dirent, relPath: string) => boolean} visit - Return true to stop the walk early
+ * @param {string[]} ignoredDirs - Directory names to skip
+ * @returns {Promise<boolean>} Whether the walk was stopped early
+ */
+async function walk(root, visit, ignoredDirs = []) {
+  async function recurse(relDir) {
+    let entries;
+    try {
+      entries = await readdir(join(root, relDir), { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const relPath = relDir ? relDir + '/' + entry.name : entry.name;
+      if (visit(entry, relPath)) return true;
+      if (entry.isDirectory() && !ignoredDirs.includes(entry.name) && await recurse(relPath)) return true;
+    }
+    return false;
+  }
+  return recurse('');
+}
+
 /**
  * Scans for available Unity WebGL builds by finding TemplateData directories
  * @param {string} targetDir - Root directory to scan
- * @param {string[]} [ignorePatterns] - Patterns to ignore (node_modules, .git, Library by default)
+ * @param {string[]} [ignoredDirs] - Directory names to skip (node_modules, .git, Library, Temp, Obj by default)
  * @returns {Promise<Array>} Array of found builds
  */
-async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**/.git/**', '**/Library/**', '**/Temp/**', '**/Obj/**']) {
+async function scanBuilds(targetDir, ignoredDirs = DEFAULT_IGNORED_DIRS) {
   const builds = [];
 
   try {
     // Find all TemplateData directories
-    const templateDataPaths = await glob('**/TemplateData', {
-      cwd: targetDir,
-      ignore: ignorePatterns,
-      onlyDirectories: true,
-      absolute: false,
-      followSymbolicLinks: false
-    });
+    const templateDataPaths = [];
+    await walk(targetDir, (entry, relPath) => {
+      if (entry.isDirectory() && entry.name === 'TemplateData') templateDataPaths.push(relPath);
+      return false;
+    }, ignoredDirs);
 
     // Process TemplateData directories
     for (const relativePath of templateDataPaths) {
@@ -70,13 +96,9 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       if (!await directoryExists(buildSubDir)) continue;
 
       // Check for wasm file in the Build directory
-      const wasmFiles = await glob('**/*.wasm*', {
-        cwd: buildSubDir,
-        absolute: false,
-        followSymbolicLinks: false
-      });
+      const hasWasm = await walk(buildSubDir, (entry) => !entry.isDirectory() && entry.name.indexOf('.wasm') > 0);
 
-      if (wasmFiles.length === 0) continue;
+      if (!hasWasm) continue;
 
       const pathParts = relativePath.split(/[/\\]/);
       let buildName;
