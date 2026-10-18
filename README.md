@@ -17,7 +17,7 @@ unity-serve $Path
 npx unity-serve $Path
 ```
 
-The server will start at http://localhost:8080 and list all WebGL directory recursively under `$Path`.
+The server requires Node.js 20 or later and starts at http://localhost:8080. It scans `$Path` for WebGL builds. If `$Path` is itself one Unity build, `/` opens that build; otherwise `/` shows the build list. The list is also available at `/__builds/`.
 
 ## Play the builds
 
@@ -29,12 +29,14 @@ The server will start at http://localhost:8080 and list all WebGL directory recu
 
 ## Development Options
 
-Settings in `index.js`:
+Configure the server with environment variables:
 
-- `hostname`: 'localhost' by default. For public hosting, change it to '0.0.0.0'
-- `port`: 8080 by default, will increment if port occupied
-- `enableCORS`: Whether to enable Cross-Origin Resource Sharing
-- `enableWasmMultithreading`: Whether to enable WebAssembly multithreading support
+- `HOST`: `localhost` by default. Binding to `0.0.0.0` exposes the server on network interfaces; use that only for a trusted local network and serve a directory containing only files you intend to share.
+- `PORT`: `8080` by default.
+- `ENABLE_CORS`: Set to `true` only when cross-origin requests are needed. Disabled by default.
+- `ENABLE_WASM_MULTITHREADING`: Set to `false` to omit cross-origin isolation headers. Enabled by default.
+
+This is a local development server, not a production hosting service. It has no authentication or HTTPS configuration. Use a production web server or static host for internet-facing deployments.
 
 ## References
 - [Unity WebGL Documentation](https://docs.unity3d.com/Manual/webgl-building.html)

@@ -1,110 +1,126 @@
 #!/usr/bin/env node
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { stat } from 'node:fs/promises'
 
 import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
-import { generateHomepage } from './homepage.js'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+import { generateHomepage, scanBuilds } from './homepage.js'
 
 const fastify = Fastify()
-const hostname = 'localhost'
-let port = 8080
-const enableCORS = true
-const enableWasmMultithreading = true
+const hostname = process.env.HOST ?? 'localhost'
+const configuredPort = Number.parseInt(process.env.PORT ?? '8080', 10)
+const enableCORS = process.env.ENABLE_CORS === 'true'
+const enableWasmMultithreading = process.env.ENABLE_WASM_MULTITHREADING !== 'false'
+const targetDir = resolve(process.argv[2] ?? '.')
 
-// Support for command-line argument to specify the target directory
-const targetDir = process.argv[2] ? join(process.cwd(), process.argv[2]) : process.cwd()
+const compressionHeaders = new Map([
+    ['.br', 'br'],
+    ['.gz', 'gzip']
+])
 
-// Add response headers based on request
+function requestPathname(request) {
+    try {
+        return new URL(request.raw.url, 'http://localhost').pathname
+    } catch {
+        return request.raw.url ?? '/'
+    }
+}
+
+function setUnityContentType(reply, pathname) {
+    const lowerPath = pathname.toLowerCase()
+    if (/\.symbols\.json\.(gz|br)$/.test(lowerPath)) {
+        reply.header('Content-Type', 'application/octet-stream')
+    } else if (/\.wasm(\.(gz|br))?$/.test(lowerPath)) {
+        reply.header('Content-Type', 'application/wasm')
+    } else if (/\.js(\.(gz|br))?$/.test(lowerPath)) {
+        reply.header('Content-Type', 'application/javascript')
+    } else if (/\.data\.gz$/.test(lowerPath)) {
+        reply.header('Content-Type', 'application/gzip')
+    } else if (/\.(json|symbols\.json)$/.test(lowerPath)) {
+        reply.header('Content-Type', 'application/json')
+    } else if (/\.(data|bundle)(\.(gz|br))?$/.test(lowerPath) || lowerPath.endsWith('.unityweb')) {
+        reply.header('Content-Type', 'application/octet-stream')
+    }
+}
+
 fastify.addHook('onSend', (request, reply, payload, done) => {
-    const path = request.url
+    const pathname = requestPathname(request)
+    const lowerPath = pathname.toLowerCase()
+    const contentType = String(reply.getHeader('content-type') ?? '').toLowerCase()
 
-    if (enableWasmMultithreading &&
-        (
-            path == '/' ||
-            path.includes('.js') ||
-            path.includes('.html') ||
-            path.includes('.htm')
-        )
-    ) {
+    // Isolation headers belong on HTML documents, including index.html served
+    // through a directory URL such as /MyBuild/.
+    if (enableWasmMultithreading && contentType.includes('text/html')) {
         reply.header('Cross-Origin-Opener-Policy', 'same-origin')
         reply.header('Cross-Origin-Embedder-Policy', 'require-corp')
         reply.header('Cross-Origin-Resource-Policy', 'cross-origin')
     }
 
-    if (enableCORS) {
-        reply.header('Access-Control-Allow-Origin', '*')
+    if (enableCORS) reply.header('Access-Control-Allow-Origin', '*')
+
+    for (const [suffix, encoding] of compressionHeaders) {
+        if (lowerPath.endsWith(suffix)) {
+            reply.header('Content-Encoding', encoding)
+            break
+        }
     }
 
-    if (path.endsWith('.br')) {
-        reply.header('Content-Encoding', 'br')
-    } else if (path.endsWith('.gz')) {
-        reply.header('Content-Encoding', 'gzip')
-    }
+    setUnityContentType(reply, pathname)
 
-    if (path.includes('.wasm')) {
-        reply.header('Content-Type', 'application/wasm')
-    } else if (path.includes('.js')) {
-        reply.header('Content-Type', 'application/javascript')
-    } else if (path.includes('.json')) {
-        reply.header('Content-Type', 'application/json')
-    } else if (
-        path.includes('.data') ||
-        path.includes('.bundle') ||
-        path.endsWith('.unityweb')
-    ) {
-        reply.header('Content-Type', 'application/octet-stream')
-    }
-
-    if (request.headers['cache-control'] == 'no-cache' &&
-        (
-            request.headers['if-modified-since'] ||
-            request.headers['if-none-match']
-        )
-    ) {
+    if (request.headers['cache-control'] === 'no-cache' &&
+        (request.headers['if-modified-since'] || request.headers['if-none-match'])) {
         delete request.headers['cache-control']
     }
 
     done()
 })
 
-// Homepage route
-fastify.get('/', async (request, reply) => {
-    reply.header('Content-Type', 'text/html')
-    reply.send(await generateHomepage(targetDir))
-})
-
-// Register static file serving
-fastify.register(fastifyStatic, {
-    root: targetDir,
-    prefix: '/',
-    immutable: true
-})
-
-const start = async (currentPort) => {
+const start = async () => {
     try {
-        await fastify.listen({ port: currentPort, host: hostname })
-        console.log(`Web server serving at http://${hostname}:${currentPort}`)
-    } catch (err) {
-        if (err.code === 'EADDRINUSE') {
-            console.log(`Port ${currentPort} is in use, trying ${currentPort + 1}...`)
-            await start(currentPort + 1)
+        const targetStats = await stat(targetDir)
+        if (!targetStats.isDirectory()) throw new Error(`Target is not a directory: ${targetDir}`)
+        const builds = await scanBuilds(targetDir)
+
+        // A directory that is itself a Unity build should launch directly.
+        // Parent folders keep the build picker at / and are also available at /__builds/.
+        const isSingleBuild = builds.some(build => build.path === '/')
+        if (isSingleBuild) {
+            fastify.get('/', async (request, reply) => reply.sendFile('index.html'))
         } else {
-            console.error(err)
-            process.exit(1)
+            const listing = async (request, reply) => reply.type('text/html').send(await generateHomepage(targetDir, builds))
+            fastify.get('/', listing)
+            fastify.get('/__builds/', listing)
         }
+
+        await fastify.register(fastifyStatic, {
+            root: targetDir,
+            prefix: '/',
+            immutable: true
+        })
+        let port = configuredPort
+        while (true) {
+            try {
+                await fastify.listen({ port, host: hostname })
+                console.log(`Web server serving at http://${hostname}:${port}`)
+                break
+            } catch (err) {
+                if (err.code !== 'EADDRINUSE') throw err
+                console.log(`Port ${port} is in use, trying ${port + 1}...`)
+                port += 1
+            }
+        }
+    } catch (err) {
+        console.error(err)
+        process.exit(1)
     }
 }
 
-start(port)
+start()
 
-// Handle process termination
-process.on('SIGINT', async () => {
-    await fastify.close()
-    console.log('Server stopped.')
-    process.exit(0)
-})
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, async () => {
+        await fastify.close()
+        console.log('Server stopped.')
+        process.exit(0)
+    })
+}

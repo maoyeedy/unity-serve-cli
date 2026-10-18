@@ -4,6 +4,9 @@
   "description": "Server for Unity WebGL builds",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "unity-serve": "./index.js"
   },

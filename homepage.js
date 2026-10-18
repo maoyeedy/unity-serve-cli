@@ -1,5 +1,5 @@
-import { join } from 'node:path'
-import { readdir, stat, access } from 'node:fs/promises'
+import { basename, join, relative, sep } from 'node:path'
+import { readdir, lstat } from 'node:fs/promises'
 import glob from 'fast-glob'
 
 /**
@@ -14,10 +14,10 @@ async function calculateDirSize(dirPath) {
     for (const item of items) {
       const itemPath = join(dirPath, item);
       try {
-        const stats = await stat(itemPath);
+        const stats = await lstat(itemPath);
         if (stats.isDirectory()) {
           totalSize += await calculateDirSize(itemPath);
-        } else {
+        } else if (stats.isFile()) {
           totalSize += stats.size;
         }
       } catch (err) {
@@ -34,8 +34,8 @@ async function calculateDirSize(dirPath) {
 
 async function fileExists(path) {
   try {
-    await access(path);
-    return true;
+    const stats = await lstat(path);
+    return stats.isDirectory() && !stats.isSymbolicLink();
   } catch {
     return false;
   }
@@ -59,7 +59,8 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       cwd: targetDir,
       ignore: ignorePatterns,
       onlyDirectories: true,
-      absolute: false
+      absolute: false,
+      followSymbolicLinks: false
     });
 
     // Process TemplateData directories
@@ -76,7 +77,8 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       // Check for wasm file in the Build directory
       const wasmFiles = await glob('**/*.wasm*', {
         cwd: buildSubDir,
-        absolute: false
+        absolute: false,
+        followSymbolicLinks: false
       });
 
       if (wasmFiles.length === 0) continue;
@@ -92,10 +94,10 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
       }
 
       if (!buildName) {
-        buildName = 'Unknown Build';
+        buildName = basename(targetDir) || 'Unity WebGL Build';
       }
 
-      const relPath = buildDir.substring(targetDir.length).replace(/\\/g, '/');
+      const relPath = relative(targetDir, buildDir).split(sep).filter(Boolean).join('/');
       const size = await calculateDirSize(buildDir);
 
       // Detect compression type
@@ -103,8 +105,7 @@ async function scanBuilds(targetDir, ignorePatterns = ['**/node_modules/**', '**
 
       builds.push({
         name: buildName,
-        path: relPath.endsWith('/') ? relPath : `${relPath}/`,
-        fullpath: buildDir,
+        path: relPath ? `/${relPath.split('/').map(encodeURIComponent).join('/')}/` : '/',
         size,
         compressionType
       });
@@ -138,6 +139,9 @@ async function detectCompressionType(buildDir) {
         } else if (file.endsWith('.wasm')) {
           compressionType = 'Uncompressed';
           break;
+        } else if (file.endsWith('.wasm.unityweb')) {
+          compressionType = 'Decompression fallback';
+          break;
         }
       }
     }
@@ -167,7 +171,7 @@ function generateBuildsList(builds) {
   }
 
   const buildItems = builds
-    .map(build => `<li><a href="${build.path}" title="${build.fullpath}"><span class="build-name">${build.name}</span><span class="build-size">${build.compressionType} ${formatSizeToMB(build.size)}</span></a></li>`)
+    .map(build => `<li><a href="${escapeHtml(build.path)}"><span class="build-name">${escapeHtml(build.name)}</span><span class="build-size">${escapeHtml(build.compressionType)} ${formatSizeToMB(build.size)}</span></a></li>`)
     .join('');
 
   return `<ul>${buildItems}</ul>`;
@@ -178,8 +182,18 @@ function generateBuildsList(builds) {
  * @param {string} targetDir - Root directory to scan
  * @returns {Promise<string>} HTML content
  */
-async function generateHomepage(targetDir) {
-  const builds = await scanBuilds(targetDir);
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[character]);
+}
+
+async function generateHomepage(targetDir, discoveredBuilds) {
+  const builds = discoveredBuilds ?? await scanBuilds(targetDir);
 
   // Sort builds by name in ascending order
   builds.sort((a, b) => a.name.localeCompare(b.name));
@@ -274,7 +288,7 @@ async function generateHomepage(targetDir) {
         </head>
         <body>
             <div class="container">
-                <h1>${targetDir}</h1>
+                <h1>Unity WebGL Builds</h1>
                 ${content}
             </div>
         </body>
@@ -282,4 +296,4 @@ async function generateHomepage(targetDir) {
   `;
 }
 
-export { generateHomepage };
+export { generateHomepage, scanBuilds };
